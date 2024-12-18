@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 import math
 
 import rclpy
@@ -13,8 +14,12 @@ import cv2
 # from cvzone.HandTrackingModule import HandDetector
 import numpy as np
 import mediapipe as mp
+from mediapipe import solutions
+from mediapipe.framework.formats import landmark_pb2
+
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import GestureRecognizer, GestureRecognizerResult, GestureRecognizerOptions
 from mediapipe.tasks.python.components.containers import NormalizedLandmark
 
 
@@ -23,78 +28,76 @@ class GestureDetect(Node):
     def __init__(self):
         super().__init__('gesture_process_node')
 
-        VisionRunningMode = vision.RunningMode
+        self.br = CvBridge()
+        self._img_msg = None
+        self.mp_drawing = solutions.drawing_utils
+        self.mp_hand = solutions.hands
+        self.results = None
 
         base_options = python.BaseOptions(
-            model_asset_path='model/hand_landmarker.task')
-        options = vision.HandLandmarkerOptions(
-            base_options=base_options,
-            num_hands=2,
-            running_mode=VisionRunningMode.VIDEO,
+            model_asset_path='gesture_recognizer.task'
         )
 
-        self.detector = vision.HandLandmarker.create_from_options(options)
+        options = GestureRecognizerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.LIVE_STREAM,
+            result_callback=self.print_result
 
-        self.mpDraw = mp.solutions.drawing_utils
-        self._img_msg = Image()
-        self.br = CvBridge()
+        )
+
+        self.recognizer = vision.GestureRecognizer.create_from_options(options)
 
         self._image_sub = self.create_subscription(
             Image, 'image_raw', self.image_callback, 10)
 
         timer_period = 0.1     # seconds
         self.counter = 0       # counter
-        gdetect = self.create_timer(timer_period, self.main)
+        gdetect = self.create_timer(timer_period, self.gd_main)
 
     def image_callback(self, msg):
         self._img_msg = self.br.imgmsg_to_cv2(msg)
 
-    @staticmethod
-    def convert_landmarks_to_image_coordinates(
-        # type: ignore
-        hand_landmarks: list[list[NormalizedLandmark]], width: int, height: int
-    ) -> list[tuple[int, int]]:
-        return [(int(lm.x * width), int(lm.y * height)) for hand_landmark in hand_landmarks for lm in hand_landmark]
+    def print_result(self, result: GestureRecognizerResult, output_image: mp.Image, timestamp_ms: int):
+        # print('pose landmarker result: {}'.format(result))
+        self.results = result
+        # print(type(result))
 
-    def findHands(self, img: np.ndarray[np.uint8]) -> None:
-        img = self._img_msg
-        height, width, _ = img.shape
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-        recognition_result = self.detector.detect(image)
-        if recognition_result.hand_landmarks:
-            hand_landmarks = recognition_result.hand_landmarks
-            landmark_positions_3d = self.convert_landmarks_to_3d(
-                hand_landmarks)
-            if landmark_positions_3d is not None:
-                self._logger.error("No Ladnmark found")
+    def draw_landmark_on_frame(self, in_image, detect_results):
+        landmark_list = detect_results.hand_landmarks
+        annotated_image = np.copy(in_image)
+        # Loop through the detected poses to visualize.
+        for idx in range(len(landmark_list)):
+            hand_landmarks = landmark_list[idx]
 
-            # Convert normalized coordinates to image coordinates
-            points = self.convert_landmarks_to_image_coordinates(
-                hand_landmarks, width, height)
+            # Draw the pose landmarks.
+            hand_landmarks_proto = landmark_pb2.NormalizedLandmarkList()
+            hand_landmarks_proto.landmark.extend([
+                landmark_pb2.NormalizedLandmark(x=landmark.x, y=landmark.y, z=landmark.z) for landmark in hand_landmarks
+            ])
+            solutions.drawing_utils.draw_landmarks(
+                annotated_image,
+                hand_landmarks_proto,
+                solutions.hands.HAND_CONNECTIONS,
+                solutions.drawing_styles.get_default_hand_connections_style())
+        return annotated_image
 
-            # Obtain hand connections from MediaPipe
-            mp_hands_connections = mp.solutions.hands.HAND_CONNECTIONS
-            points1 = [points[connection[0]]
-                       for connection in mp_hands_connections]
-            points2 = [points[connection[1]]
-                       for connection in mp_hands_connections]
+    def gd_main(self):
 
-            return recognition_result
+        if self._img_msg is not None:
+            img_frame = self._img_msg
+            mp_image = mp.Image(
+                image_format=mp.ImageFormat.SRGB, data=img_frame)
 
-        else:
-            return False
+            self.recognizer.recognize_async(mp_image, self.counter)
 
-    def main(self):
-        detect_results = self.findHands(self._img_msg)
+            if(not (self.results is None)):
+                annotated_frame = self.draw_landmark_on_frame(
+                    mp_image.numpy_view(), self.results)
 
-        if detect_results:
-            print('hand detected')
-            annotated_image = self.mpDraw.draw_landmarks(
-                self._img_msg, detect_results)
-            cv2.imshow("Image", annotated_image)
-        else:
-            print('no hand detected')
-            cv2.imshow("Image", self._img_msg)
+                cv2.imshow('Hand Landmark Frame',annotated_frame)
+                print("showing detected image")
+            else:
+                cv2.imshow('Show', img_frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("Closing Camera Stream")
@@ -102,3 +105,28 @@ class GestureDetect(Node):
             self.destroy_node()
             rclpy.shutdown()
             sys.exit(0)
+
+        self.counter += 1
+
+
+def main(args=None):
+    """
+    Run a Listener node standalone.
+
+    This function is called directly when using an entrypoint. Entrypoints are configured in
+    setup.py. This along with the script installation in setup.cfg allows a listener node to be run
+    with the command `ros2 run examples_rclpy_executors listener`.
+
+    :param args: Arguments passed in from the command line.
+    """
+    try:
+        rclpy.init(args=args)
+        bD = GestureDetect()
+        rclpy.spin(bD)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+
+
+if __name__ == '__main__':
+    # Runs a listener node when this script is run directly (not through an entrypoint)
+    main()
