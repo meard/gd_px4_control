@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import subprocess, os, platform
+from glob import glob
 
 package_name = 'gd_px4_control'
 
@@ -15,11 +17,12 @@ setup(
     zip_safe=True,
     maintainer='meard',
     maintainer_email='hansda.mahadev2@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Python node for publishing hand gesture output to PX4 control ',
+    license='MIT License',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'gd_px4_control = gd_px4_control.gd_px4_signal:main',
         ],
     },
 )
